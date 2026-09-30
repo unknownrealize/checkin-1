@@ -1,0 +1,2 @@
+# schedule.mjs 产生的本地运行状态（CI 中通过 actions/cache 保存，不需要提交）
+.checkin-state/

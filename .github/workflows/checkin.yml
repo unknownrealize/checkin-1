@@ -1,0 +1,91 @@
+name: 自动签到
+
+on:
+  schedule:
+    # GitHub 的 cron 使用 UTC；每 30 分钟唤醒一次，由 schedule.mjs 判断是否到达 24~25 小时的时间点
+    - cron: "9,39 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 忽略 24~25 小时间隔，立即执行一次
+        type: boolean
+        default: true
+
+permissions:
+  contents: read # actions/checkout 读取代码
+  actions: write # actions/cache 读写运行状态
+
+# 同一时间只允许一个签到流程，后触发的排队等待（避免并发写状态）
+concurrency:
+  group: auto-checkin
+  cancel-in-progress: false
+
+jobs:
+  checkin:
+    name: 执行签到
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 恢复运行状态
+        uses: actions/cache/restore@v4
+        with:
+          path: .checkin-state
+          key: checkin-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            checkin-state-
+
+      - name: 判断是否到达执行时间
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FORCE" != "false" ]; then
+            echo "手动触发，跳过时间间隔检查"
+            echo "due=true" >> "$GITHUB_OUTPUT"
+          else
+            node schedule.mjs due
+          fi
+
+      - name: 执行签到
+        id: checkin
+        if: steps.gate.outputs.due == 'true'
+        continue-on-error: true
+        env:
+          CHECKIN_ACCOUNTS: ${{ secrets.CHECKIN_ACCOUNTS }}
+          CHECKIN_BASE_URL: ${{ vars.CHECKIN_BASE_URL }}
+          CHECKIN_LOGIN_DELAY_MIN: ${{ vars.CHECKIN_LOGIN_DELAY_MIN }}
+          CHECKIN_LOGIN_DELAY_MAX: ${{ vars.CHECKIN_LOGIN_DELAY_MAX }}
+          CHECKIN_CONCURRENCY: ${{ vars.CHECKIN_CONCURRENCY }}
+        run: node checkin.mjs
+
+      - name: 更新运行状态
+        if: steps.gate.outputs.due == 'true'
+        run: node schedule.mjs update --status=${{ steps.checkin.outcome }}
+
+      - name: 保存运行状态
+        if: steps.gate.outputs.due == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .checkin-state
+          key: checkin-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 总结
+        if: always()
+        run: |
+          if [ "${{ steps.gate.outcome }}" != "success" ]; then
+            echo "判断执行时间失败，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ "${{ steps.gate.outputs.due }}" != "true" ]; then
+            echo "未到执行时间，本次跳过" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${{ steps.checkin.outcome }}" = "failure" ]; then
+            echo "签到失败，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "签到流程执行完成" >> "$GITHUB_STEP_SUMMARY"
