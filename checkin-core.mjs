@@ -55,6 +55,7 @@ function readConfig({ envPrefix, defaultBaseUrl, mode }) {
     mode === "login+checkin"
       ? readRange(envPrefix, "LOGIN_DELAY_MIN", "LOGIN_DELAY_MAX", 10, 1200)
       : { min: 0, max: 0 };
+  const retryWait = readRange(envPrefix, "RETRY_WAIT_MIN", "RETRY_WAIT_MAX", 30, 120);
 
   return {
     mode,
@@ -65,6 +66,9 @@ function readConfig({ envPrefix, defaultBaseUrl, mode }) {
     delayMin: delay.min,
     delayMax: delay.max,
     concurrency: readIntEnv(`${envPrefix}CONCURRENCY`, 0),
+    retries: Math.max(1, readIntEnv(`${envPrefix}RETRIES`, 3)),
+    retryWaitMin: retryWait.min,
+    retryWaitMax: retryWait.max,
   };
 }
 
@@ -116,8 +120,44 @@ function parseAccounts(raw, accountsEnvName) {
   return accounts;
 }
 
+function httpError(message, retryable) {
+  const error = new Error(message);
+  error.retryable = retryable === true;
+  return error;
+}
+
+function truncate(text, limit = 200) {
+  const oneLine = String(text).replace(/\s+/g, " ").trim();
+  return oneLine.length > limit ? `${oneLine.slice(0, limit)}…` : oneLine;
+}
+
+// 风控/WAF 拦截时会返回 HTTP 200 + HTML 验证页面（不是 JSON），需要识别出来并提示
+function isHtmlBody(response, data) {
+  if (typeof data !== "string") return false;
+  const contentType = response.headers.get("content-type") ?? "";
+  return contentType.includes("text/html") || /<(!doctype|html)/i.test(data);
+}
+
+// 把失败原因整理成一行简短日志（HTML 页面只截取开头，避免刷屏）
+function describeFailure(response, data) {
+  if (isHtmlBody(response, data)) {
+    return `被站点风控拦截：返回的是 HTML 验证页面，通常与临时限流或机房 IP 有关（HTTP ${response.status}）`;
+  }
+  if (typeof data === "string") return `响应不是 JSON（HTTP ${response.status}）：${truncate(data)}`;
+  return `HTTP ${response.status}：${truncate(JSON.stringify(data))}`;
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 async function requestJson(url, options) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (error) {
+    throw httpError(`请求失败（网络错误）：${error?.message ?? error}`, true);
+  }
   const text = await response.text();
   let data;
   try {
@@ -126,6 +166,21 @@ async function requestJson(url, options) {
     data = text;
   }
   return { response, data };
+}
+
+// 只对临时性失败重试（网络错误、5xx/429、风控页面）；密码错误等直接失败，不浪费时间
+async function withRetry(tag, label, attempts, waitMin, waitMax, task) {
+  const maxAttempts = Math.max(1, attempts);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      if (error?.retryable !== true || attempt >= maxAttempts) throw error;
+      const waitSeconds = randomInt(waitMin, waitMax);
+      log(`${tag} ${label}第 ${attempt}/${maxAttempts} 次失败（${error.message}），${waitSeconds} 秒后重试`);
+      await sleep(waitSeconds * 1000);
+    }
+  }
 }
 
 // new-api 系登录接口：POST /api/user/login?turnstile=
@@ -144,7 +199,10 @@ async function login(baseUrl, username, password) {
   });
 
   if (!response.ok || data?.success !== true) {
-    throw new Error(`登录失败 (HTTP ${response.status})：${JSON.stringify(data)}`);
+    throw httpError(
+      `登录失败，${describeFailure(response, data)}`,
+      isHtmlBody(response, data) || isRetryableStatus(response.status),
+    );
   }
 
   return {
@@ -170,7 +228,10 @@ async function checkin(baseUrl, accessToken) {
   });
 
   if (!response.ok) {
-    throw new Error(`签到请求失败 (HTTP ${response.status})：${JSON.stringify(data)}`);
+    throw httpError(
+      `签到请求失败，${describeFailure(response, data)}`,
+      isHtmlBody(response, data) || isRetryableStatus(response.status),
+    );
   }
 
   return data;
@@ -188,7 +249,14 @@ async function runAccount({ config, account, index }) {
     }
 
     log(`${tag} 开始登录`);
-    const { accessToken, name, raw } = await login(config.baseUrl, account.username, account.password);
+    const { accessToken, name, raw } = await withRetry(
+      tag,
+      "登录",
+      config.retries,
+      config.retryWaitMin,
+      config.retryWaitMax,
+      () => login(config.baseUrl, account.username, account.password),
+    );
 
     if (config.mode === "login-only") {
       // 站点没有独立签到接口：登录成功即完成签到，同时把响应里的 checked_in 状态带进日志
@@ -204,7 +272,9 @@ async function runAccount({ config, account, index }) {
     log(`${tag} 登录成功（${displayName(name)}），随机等待 ${waitSeconds} 秒后签到`);
     if (waitSeconds > 0) await sleep(waitSeconds * 1000);
 
-    const result = await checkin(config.baseUrl, accessToken);
+    const result = await withRetry(tag, "签到", config.retries, config.retryWaitMin, config.retryWaitMax, () =>
+      checkin(config.baseUrl, accessToken),
+    );
     if (result?.success === true) {
       const message = result.message ?? "签到成功";
       log(`${tag} 签到成功：${message}`);

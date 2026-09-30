@@ -69,6 +69,9 @@ jobs:
           CHECKIN2_LOGIN_STAGGER_MIN: ${{ vars.CHECKIN2_LOGIN_STAGGER_MIN }}
           CHECKIN2_LOGIN_STAGGER_MAX: ${{ vars.CHECKIN2_LOGIN_STAGGER_MAX }}
           CHECKIN2_CONCURRENCY: ${{ vars.CHECKIN2_CONCURRENCY }}
+          CHECKIN2_RETRIES: ${{ vars.CHECKIN2_RETRIES }}
+          CHECKIN2_RETRY_WAIT_MIN: ${{ vars.CHECKIN2_RETRY_WAIT_MIN }}
+          CHECKIN2_RETRY_WAIT_MAX: ${{ vars.CHECKIN2_RETRY_WAIT_MAX }}
         run: node checkin2.mjs
 
       - name: 更新运行状态

@@ -69,6 +69,9 @@ jobs:
           CHECKIN_LOGIN_DELAY_MIN: ${{ vars.CHECKIN_LOGIN_DELAY_MIN }}
           CHECKIN_LOGIN_DELAY_MAX: ${{ vars.CHECKIN_LOGIN_DELAY_MAX }}
           CHECKIN_CONCURRENCY: ${{ vars.CHECKIN_CONCURRENCY }}
+          CHECKIN_RETRIES: ${{ vars.CHECKIN_RETRIES }}
+          CHECKIN_RETRY_WAIT_MIN: ${{ vars.CHECKIN_RETRY_WAIT_MIN }}
+          CHECKIN_RETRY_WAIT_MAX: ${{ vars.CHECKIN_RETRY_WAIT_MAX }}
         run: node checkin.mjs
 
       - name: 更新运行状态
