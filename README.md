@@ -17,6 +17,7 @@
 | `checkin2.mjs` | 站点二入口：登录即签到 |
 | `checkin-core.mjs` | 公共逻辑：账号解析、并发控制、随机等待、登录、签到、重试、日志脱敏 |
 | `schedule.mjs` | 调度状态：判断是否到达计划时刻、计算下一次计划时刻 |
+| `run-local.mjs` | 本地 / 自托管定时运行入口（复用同一套调度逻辑，见「本地 / 自托管运行」） |
 
 ## 两个站点的差别
 
@@ -104,6 +105,47 @@ foo@example.com:my-password-3
 
 之后无需任何操作，两个工作流每天各自在配置的时间窗口内随机挑一个时刻执行一次，运行记录都在 Actions 标签页。
 
+## 本地 / 自托管运行（可选）
+
+不想用 GitHub 托管运行器（出口 IP 容易被 WAF 拦），或者想再留一条本地链路时，可以用 `run-local.mjs` 在自己的机器上跑。它复用同一套调度逻辑和站点脚本，行为与工作流一致：**每 30 分钟检查一次，只有到了当天窗口内的随机时刻才真正登录签到**。
+
+1. 需要 Node.js 18+，把仓库克隆到要运行的机器上。
+2. 在仓库目录下新建 `.env.local`（已在 `.gitignore` 中忽略，不会被提交），写入账号：
+
+   ```bash
+   CHECKIN_ACCOUNTS=alice:my-password-1
+   CHECKIN2_ACCOUNTS=foo@example.com:my-password-2
+   ```
+
+   多个账号用 JSON 数组写在一行里（属性名必须是 `username` / `password`），例如 `CHECKIN_ACCOUNTS=[{"username":"alice","password":"p1"},{"username":"bob","password":"p2"}]`；也可以不用文件，直接在命令行里传环境变量（这时可以用真实换行分隔多个账号）。
+3. 先手动跑一次确认能签到成功：
+
+   ```bash
+   node run-local.mjs --force
+   ```
+4. 加到系统定时任务，每 30 分钟调用一次。Linux / macOS 的 crontab 示例：
+
+   ```bash
+   */30 * * * * cd /path/to/haokun && /usr/bin/node run-local.mjs >> checkin.log 2>&1
+   ```
+
+   Windows 用「任务计划程序」：程序填 `node`，参数填 `run-local.mjs`，起始目录填仓库目录，触发器设为每 30 分钟一次。
+5. 常用命令：
+
+   | 命令 | 作用 |
+   | --- | --- |
+   | `node run-local.mjs` | 两个站点都检查，该执行的才执行（推荐交给定时任务） |
+   | `node run-local.mjs checkin.mjs` | 只跑站点一 |
+   | `node run-local.mjs checkin2.mjs` | 只跑站点二 |
+   | `node run-local.mjs --force` | 忽略计划时刻，立即执行一次 |
+
+说明：
+
+- 运行状态保存在仓库下的 `.checkin-state/` 与 `.checkin2-state/`，可以用 `CHECKIN_STATE_DIR` / `CHECKIN2_STATE_DIR` 改到别处；这两个目录都在 `.gitignore` 里。
+- 所有配置项（`CHECKIN_WINDOW_START`、`CHECKIN2_TIMEZONE`、`CHECKIN_RETRIES`……）与工作流完全一致，同样通过环境变量或 `.env.local` 提供。
+- 和 GitHub Actions 同时开着也不会出错：同一天重复签到只会得到「已签到」，脚本按成功处理；不过建议只保留一条链路，免得白跑。
+- 本地链路的出口是自家网络 IP，通常不会被 WAF 拦——被机房 IP 拦死时这是最稳的办法。
+
 ## 可选配置（Variables）
 
 在 **Settings → Secrets and variables → Actions → Variables** 中添加，全部可省略。
@@ -143,6 +185,13 @@ foo@example.com:my-password-3
 | `CHECKIN2_RETRY_WAIT_MAX` | `120` | 两次尝试之间随机等待的最大秒数 |
 
 站点二没有「登录后等待」配置：登录本身就是签到，没有后续请求可等。
+
+**两个站点通用**：
+
+| 名称 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `RUNNER_LABELS` | Variable | `ubuntu-latest` | 运行器标签，两个工作流共用。设为 `self-hosted` 即改用自托管运行器（出口 IP 是自家网络） |
+| `HTTPS_PROXY` | Secret | 空 | 可选代理，如 `http://user:pass@host:port`。配置后签到步骤会走代理，并自动改用 Node 24（只有 Node 24+ 的内置 fetch 会读代理环境变量） |
 
 ## 随机性与每天的执行时刻
 
@@ -196,7 +245,7 @@ node schedule.mjs update --status=success          # 记录成功：计划时刻
 node schedule.mjs update --status=failure          # 记录失败：20 分钟后重试，3 次后改为等明天
 ```
 
-需要 Node.js 18 或更高版本（脚本使用内置的 `fetch`）。
+需要 Node.js 18 或更高版本（脚本使用内置的 `fetch`）。想让它按计划每天自动执行（而不是手动跑一次），见上文「本地 / 自托管运行」。
 
 **Q：想改重试次数、重试间隔？**
 改 `schedule.mjs` 顶部的常量：`RETRY_SECONDS`（失败后的重试间隔，默认 20 分钟）、`MAX_FAILS`（当天最多尝试几次，默认 3），两个站点同时生效；「每天几点到几点执行」不用改代码，通过 Variables 里的 `*_WINDOW_START` / `*_WINDOW_END` / `*_TIMEZONE` 调整。
@@ -217,11 +266,17 @@ node schedule.mjs update --status=failure          # 记录失败：20 分钟后
 
 看到「疑似阿里云 WAF 验证页」基本可以确定是出口 IP 信誉问题：GitHub 托管运行器用的是云机房 IP，同一段 IP 上还有大量其他用户的自动化请求，很容易被 WAF 直接判为可疑流量；页面里的 JS 校验脚本（`acw_sc__v2`）需要浏览器执行，脚本没法过。
 
-脚本已经做过的处理：这类失败按临时性失败对待，等待 `*_RETRY_WAIT_MIN`~`*_RETRY_WAIT_MAX`（默认 30~120 秒）后重试，最多 `*_RETRIES` 次（默认 3 次）；当天仍失败就 20 分钟后整体再来一轮，最多 3 轮。多数临时限流会在这几轮里恢复。想要进一步降低概率或彻底解决：
+脚本已经做过的处理：这类失败按临时性失败对待，等待 `*_RETRY_WAIT_MIN`~`*_RETRY_WAIT_MAX`（默认 30~120 秒）后重试，最多 `*_RETRIES` 次（默认 3 次）；当天仍失败就 20 分钟后整体再来一轮，最多 3 轮。多数临时限流会在这几轮里恢复。
 
-- 调大错峰与重试等待：`*_LOGIN_STAGGER_MIN/MAX`、`*_RETRY_WAIT_MIN/MAX`。
-- 换出口网络：改用自托管 runner（`runs-on: self-hosted`）在自家网络里跑，或给工作流加代理——在仓库 Secrets 里配置 `HTTPS_PROXY`（例如 `http://user:pass@host:port`），并在「执行签到」步骤的 `env` 里加上 `NODE_USE_ENV_PROXY: "1"`、`HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}`；同时在该步骤前加一步 `actions/setup-node@v4`（`node-version: 24`），因为只有 Node 24 及以上的内置 `fetch` 才会读取这两个环境变量（已验证：设置后请求确实走代理）。
-- 长期被拦时，只能改用自建/其他网络出口运行脚本。
+先明确一点：**没有脚本层的「绕过」**。验证页里的 JS 校验（`acw_sc__v2`）需要浏览器执行，纯脚本过不了；能不能通过只看**出口 IP 的信誉**。可行的办法只有换出口：
+
+| 方案 | 做法 | 说明 |
+| --- | --- | --- |
+| ① 自托管运行器 | 在自家机器/服务器上装 GitHub Actions runner，再把仓库 Variable `RUNNER_LABELS` 设为 `self-hosted` | 出口变成自家网络 IP；工作流、日志、定时都不用改，两个工作流同时生效 |
+| ② 代理出口 | 在 Secrets 里配置 `HTTPS_PROXY`（如 `http://user:pass@host:port`） | 工作流已内置：签到步骤带 `NODE_USE_ENV_PROXY=1`，检测到该 Secret 时自动安装 Node 24（只有 Node 24+ 的内置 `fetch` 才读代理环境变量，已验证生效）。代理 IP 必须干净——数据中心 IP、公开免费代理往往自己就在黑名单里，住宅 IP 最稳 |
+| ③ 本地运行 | 在自家机器上用 `node run-local.mjs` + 系统定时任务 | 见上文「本地 / 自托管运行」，出口同样是自家 IP |
+
+调大 `*_LOGIN_STAGGER_MIN/MAX`、`*_RETRY_WAIT_MIN/MAX` 只能降低触发概率，解决不了整段 IP 被拦的情况。
 
 **Q：日志里怎么区分「密码错误」和「风控拦截」？**
 密码错误是 HTTP 401/200 + JSON，消息形如 `登录失败，HTTP 401：{"success":false,...}`；风控拦截是 HTTP 200 + HTML 页面，消息里会明确写「被站点风控拦截」，并且只截取前 200 个字符，不会刷屏。
