@@ -96,15 +96,15 @@ if (command === "due") {
   cmdDue();
 } else if (command === "update") {
   const arg = args.find((item) => item.startsWith("--status="));
-  if (!arg) {
+  const status = arg?.slice("--status=".length);
+  if (!["success", "ok", "failure", "fail"].includes(status)) {
     console.error("用法：node schedule.mjs update --status=success|failure");
-    process.exitCode = 1;
-  } else {
-    cmdUpdate(arg.slice("--status=".length));
+    process.exit(1);
   }
+  cmdUpdate(status);
 } else {
   console.error("用法：node schedule.mjs due | node schedule.mjs update --status=success|failure");
-  process.exitCode = 1;
+  process.exit(1);
 }
 
-console.log(`[${timestamp()}] schedule.mjs ${command ?? ""} 完成`);
+console.log(`[${timestamp()}] schedule.mjs ${command} 完成`);

@@ -1,9 +1,10 @@
-name: 自动签到
+name: 自动签到 2
 
 on:
   schedule:
-    # GitHub 的 cron 使用 UTC；每 30 分钟唤醒一次，由 schedule.mjs 判断是否到达 24~25 小时的时间点
-    - cron: "9,39 * * * *"
+    # GitHub 的 cron 使用 UTC；每 30 分钟唤醒一次（与「自动签到」错开 10 分钟），
+    # 由 schedule.mjs 判断是否到达 24~25 小时的时间点
+    - cron: "19,49 * * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -17,14 +18,14 @@ permissions:
 
 # 同一时间只允许一个签到流程，后触发的排队等待（避免并发写状态）
 concurrency:
-  group: auto-checkin
+  group: auto-checkin2
   cancel-in-progress: false
 
 jobs:
   checkin:
     name: 执行签到
     runs-on: ubuntu-latest
-    timeout-minutes: 90 # 需大于 登录错峰上限 + 登录后等待上限
+    timeout-minutes: 45 # 需大于 登录错峰上限（登录即签到，没有登录后的等待）
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -32,21 +33,22 @@ jobs:
       - name: 恢复运行状态
         uses: actions/cache/restore@v4
         with:
-          path: .checkin-state
-          key: checkin-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .checkin2-state
+          key: checkin2-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            checkin-state-
+            checkin2-state-
 
       - name: 检查账号配置与执行时间
         id: gate
         env:
-          ACCOUNTS: ${{ secrets.CHECKIN_ACCOUNTS }}
+          CHECKIN_STATE_DIR: .checkin2-state
+          ACCOUNTS: ${{ secrets.CHECKIN2_ACCOUNTS }}
           EVENT_NAME: ${{ github.event_name }}
           FORCE: ${{ inputs.force }}
         run: |
           if [ -z "$ACCOUNTS" ]; then
-            echo "未配置 CHECKIN_ACCOUNTS，本次跳过（在 Secrets 中配置后会自动启用）"
-            echo "跳过原因：未配置 CHECKIN_ACCOUNTS" >> "$GITHUB_STEP_SUMMARY"
+            echo "未配置 CHECKIN2_ACCOUNTS，本次跳过（在 Secrets 中配置后会自动启用）"
+            echo "跳过原因：未配置 CHECKIN2_ACCOUNTS" >> "$GITHUB_STEP_SUMMARY"
             echo "due=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -62,25 +64,25 @@ jobs:
         if: steps.gate.outputs.due == 'true'
         continue-on-error: true
         env:
-          CHECKIN_ACCOUNTS: ${{ secrets.CHECKIN_ACCOUNTS }}
-          CHECKIN_BASE_URL: ${{ vars.CHECKIN_BASE_URL }}
-          CHECKIN_LOGIN_STAGGER_MIN: ${{ vars.CHECKIN_LOGIN_STAGGER_MIN }}
-          CHECKIN_LOGIN_STAGGER_MAX: ${{ vars.CHECKIN_LOGIN_STAGGER_MAX }}
-          CHECKIN_LOGIN_DELAY_MIN: ${{ vars.CHECKIN_LOGIN_DELAY_MIN }}
-          CHECKIN_LOGIN_DELAY_MAX: ${{ vars.CHECKIN_LOGIN_DELAY_MAX }}
-          CHECKIN_CONCURRENCY: ${{ vars.CHECKIN_CONCURRENCY }}
-        run: node checkin.mjs
+          CHECKIN2_ACCOUNTS: ${{ secrets.CHECKIN2_ACCOUNTS }}
+          CHECKIN2_BASE_URL: ${{ vars.CHECKIN2_BASE_URL }}
+          CHECKIN2_LOGIN_STAGGER_MIN: ${{ vars.CHECKIN2_LOGIN_STAGGER_MIN }}
+          CHECKIN2_LOGIN_STAGGER_MAX: ${{ vars.CHECKIN2_LOGIN_STAGGER_MAX }}
+          CHECKIN2_CONCURRENCY: ${{ vars.CHECKIN2_CONCURRENCY }}
+        run: node checkin2.mjs
 
       - name: 更新运行状态
         if: steps.gate.outputs.due == 'true'
+        env:
+          CHECKIN_STATE_DIR: .checkin2-state
         run: node schedule.mjs update --status=${{ steps.checkin.outcome }}
 
       - name: 保存运行状态
         if: steps.gate.outputs.due == 'true'
         uses: actions/cache/save@v4
         with:
-          path: .checkin-state
-          key: checkin-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .checkin2-state
+          key: checkin2-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 总结
         if: always()
