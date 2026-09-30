@@ -2,12 +2,12 @@ name: 自动签到
 
 on:
   schedule:
-    # GitHub 的 cron 使用 UTC；每 30 分钟唤醒一次，由 schedule.mjs 判断是否到达 24~25 小时的时间点
+    # GitHub 的 cron 使用 UTC；每 30 分钟唤醒一次，由 schedule.mjs 判断当天是否已到计划时刻
     - cron: "9,39 * * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: 忽略 24~25 小时间隔，立即执行一次
+        description: 忽略计划时刻，立即执行一次
         type: boolean
         default: true
 
@@ -40,6 +40,10 @@ jobs:
       - name: 检查账号配置与执行时间
         id: gate
         env:
+          CHECKIN_STATE_DIR: .checkin-state
+          CHECKIN_TIMEZONE: ${{ vars.CHECKIN_TIMEZONE }}
+          CHECKIN_WINDOW_START: ${{ vars.CHECKIN_WINDOW_START }}
+          CHECKIN_WINDOW_END: ${{ vars.CHECKIN_WINDOW_END }}
           ACCOUNTS: ${{ secrets.CHECKIN_ACCOUNTS }}
           EVENT_NAME: ${{ github.event_name }}
           FORCE: ${{ inputs.force }}
@@ -51,7 +55,7 @@ jobs:
             exit 0
           fi
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FORCE" != "false" ]; then
-            echo "手动触发，跳过时间间隔检查"
+            echo "手动触发，跳过计划时刻检查"
             echo "due=true" >> "$GITHUB_OUTPUT"
           else
             node schedule.mjs due
@@ -76,6 +80,8 @@ jobs:
 
       - name: 更新运行状态
         if: steps.gate.outputs.due == 'true'
+        env:
+          CHECKIN_STATE_DIR: .checkin-state
         run: node schedule.mjs update --status=${{ steps.checkin.outcome }}
 
       - name: 保存运行状态
@@ -89,11 +95,11 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.gate.outcome }}" != "success" ]; then
-            echo "判断执行时间失败，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
+            echo "判断是否到达计划时刻失败，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           if [ "${{ steps.gate.outputs.due }}" != "true" ]; then
-            echo "本次未执行（未到执行时间或未配置账号，详见上方「检查账号配置与执行时间」步骤）" >> "$GITHUB_STEP_SUMMARY"
+            echo "本次未执行（未到计划时刻或未配置账号，详见上方「检查账号配置与执行时间」步骤）" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "${{ steps.checkin.outcome }}" = "failure" ]; then

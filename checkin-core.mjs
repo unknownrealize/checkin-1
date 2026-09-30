@@ -138,11 +138,32 @@ function isHtmlBody(response, data) {
   return contentType.includes("text/html") || /<(!doctype|html)/i.test(data);
 }
 
+// 被风控拦截的 HTML 页面：提取能定位来源的线索（标题、WAF 特征、可见文本开头）
+function describeWafPage(response, data) {
+  const text = String(data);
+  const hints = [];
+  const cookies = response.headers.getSetCookie?.() ?? [];
+  if (/acw_sc__v2|acw_sc_v2/i.test(text) || cookies.some((cookie) => cookie.startsWith("acw_tc="))) {
+    hints.push("疑似阿里云 WAF 验证页");
+  }
+  const title = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  if (title?.trim()) hints.push(`标题「${truncate(title, 60)}」`);
+  const visible = text
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ");
+  if (visible.trim()) hints.push(`内容开头「${truncate(visible, 120)}」`);
+  return (
+    `被站点风控拦截：返回的是 HTML 验证页面（HTTP ${response.status}` +
+    `${hints.length ? `，${hints.join("，")}` : ""}）` +
+    "，常见原因是出口 IP 被临时拦截或限流（例如 GitHub 托管运行器）"
+  );
+}
+
 // 把失败原因整理成一行简短日志（HTML 页面只截取开头，避免刷屏）
 function describeFailure(response, data) {
-  if (isHtmlBody(response, data)) {
-    return `被站点风控拦截：返回的是 HTML 验证页面，通常与临时限流或机房 IP 有关（HTTP ${response.status}）`;
-  }
+  if (isHtmlBody(response, data)) return describeWafPage(response, data);
   if (typeof data === "string") return `响应不是 JSON（HTTP ${response.status}）：${truncate(data)}`;
   return `HTTP ${response.status}：${truncate(JSON.stringify(data))}`;
 }
@@ -234,6 +255,11 @@ async function checkin(baseUrl, accessToken) {
     );
   }
 
+  // HTTP 200 也可能是风控返回的 HTML 验证页，识别出来按可重试处理
+  if (isHtmlBody(response, data)) {
+    throw httpError(`签到失败，${describeFailure(response, data)}`, true);
+  }
+
   return data;
 }
 
@@ -281,9 +307,18 @@ async function runAccount({ config, account, index }) {
       return { tag, ok: true, message };
     }
 
-    const message = result?.message ?? JSON.stringify(result);
-    log(`${tag} 签到未执行：${message}`);
-    return { tag, ok: true, skipped: true, message };
+    // 站点把「今天已经签到过」也返回成 success=false：算正常跳过，不算失败
+    const message =
+      typeof result?.message === "string"
+        ? result.message
+        : truncate(typeof result === "string" ? result : JSON.stringify(result ?? null));
+    if (/已签到|已经签到|签到过|重复签到|already\s*checked/i.test(message)) {
+      log(`${tag} 今日已签到（无需重复）：${message}`);
+      return { tag, ok: true, skipped: true, message };
+    }
+
+    log(`${tag} 签到失败：${message}`);
+    return { tag, ok: false, message };
   } catch (error) {
     const message = error?.message ?? String(error);
     log(`${tag} 失败：${message}`);
@@ -311,7 +346,7 @@ function summarize(results) {
   const failed = results.filter((result) => !result.ok);
   console.log("\n===== 本次执行结果 =====");
   for (const result of results) {
-    const status = !result.ok ? "失败" : result.skipped ? "未执行" : "成功";
+    const status = !result.ok ? "失败" : result.skipped ? "已签到" : "成功";
     console.log(`${result.tag} ${status}：${result.message}`);
   }
   console.log(`成功 ${results.length - failed.length} / ${results.length}，失败 ${failed.length}`);
