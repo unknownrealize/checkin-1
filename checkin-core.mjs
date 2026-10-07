@@ -139,13 +139,33 @@ function isHtmlBody(response, data) {
 }
 
 // 被风控拦截的 HTML 页面：提取能定位来源的线索（标题、WAF 特征、可见文本开头）
+//
+// 阿里云 WAF 的拦截页有两种，日志里必须区分开：
+//  1. 「人工验证页」（aliyun_waf_aa/bb 指纹 + AliyunCaptcha.js 滑块验证）：需要在浏览器里人工完成验证，
+//     脚本无法自动通过，重试也不会恢复——只能换出口 IP（见 README「常见问题」）。
+//     判定依据是 GitHub 托管运行器（ubuntu x64/arm64、macOS、Windows 实测均被拦）返回的真实页面。
+//  2. 旧版 JS 校验页（acw_sc__v2 / arg1）：同样需要浏览器执行脚本，脚本过不了。
 function describeWafPage(response, data) {
   const text = String(data);
   const hints = [];
   const cookies = response.headers.getSetCookie?.() ?? [];
-  if (/acw_sc__v2|acw_sc_v2/i.test(text) || cookies.some((cookie) => cookie.startsWith("acw_tc="))) {
+  const hasChallengeScript = /acw_sc__v2|acw_sc_v2|arg1=/i.test(text);
+  const hasAcwCookie = cookies.some((cookie) => cookie.startsWith("acw_tc="));
+  // 人工验证页会内嵌 renderData（含 sceneId / traceid）并去加载滑块验证 SDK
+  const captchaPage = /aliyun_waf_(aa|bb)|AliyunCaptcha\.js|nc-container/i.test(text);
+
+  if (captchaPage) {
+    const sceneId = text.match(/"sceneId":"([^"]+)"/)?.[1];
+    const traceId = text.match(/"traceid":"([^"]+)"/)?.[1];
+    hints.push("阿里云 WAF 人工验证页（滑块验证 AliyunCaptcha）");
+    if (sceneId) hints.push(`sceneId=${sceneId}`);
+    if (traceId) hints.push(`TraceID=${traceId}`);
+  } else if (hasChallengeScript) {
+    hints.push("疑似阿里云 WAF 的 JS 校验页（acw_sc__v2）");
+  } else if (hasAcwCookie || /aliyun_waf_(aa|bb)/i.test(text)) {
     hints.push("疑似阿里云 WAF 验证页");
   }
+
   const title = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
   if (title?.trim()) hints.push(`标题「${truncate(title, 60)}」`);
   const visible = text
@@ -154,10 +174,14 @@ function describeWafPage(response, data) {
     .replace(/<[^>]*>/g, " ")
     .replace(/&[a-z#0-9]+;/gi, " ");
   if (visible.trim()) hints.push(`内容开头「${truncate(visible, 120)}」`);
+
+  const cause = captchaPage
+    ? "这是按出口 IP 的整站拦截（与请求头、客户端无关：同一条请求换本机 IP 就能拿到 JSON），脚本无法自动通过人工验证，只能更换出口 IP：在 Secrets 里配置 HTTPS_PROXY 代理，或把 RUNNER_LABELS 设为 self-hosted 用自家网络"
+    : "常见原因是出口 IP 被临时拦截或限流（例如 GitHub 托管运行器）";
+
   return (
     `被站点风控拦截：返回的是 HTML 验证页面（HTTP ${response.status}` +
-    `${hints.length ? `，${hints.join("，")}` : ""}）` +
-    "，常见原因是出口 IP 被临时拦截或限流（例如 GitHub 托管运行器）"
+    `${hints.length ? `，${hints.join("，")}` : ""}），${cause}`
   );
 }
 
